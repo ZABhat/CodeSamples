@@ -9,6 +9,8 @@ using ExcelDataReader;
 using Newtonsoft.Json;
 using Serilog;
 using Microsoft.Extensions.Configuration;
+using CsvHelper;
+using System.Globalization;
 
 namespace PostRequestApp
 {
@@ -22,26 +24,57 @@ namespace PostRequestApp
                 .Build();
 
             var apiUrl = configuration["ApiUrl"];
-            var excelPath = configuration["ExcelPath"];
+            var csvPath = configuration["CsvPath"];
             var logPath = configuration["LogPath"];
+            var clientId = configuration["client_id"];
+            var clientSecret = configuration["client_secret"];
 
             Log.Logger = new LoggerConfiguration()
                 .WriteTo.File(logPath)
                 .CreateLogger();
-
+            await Console.Out.WriteLineAsync($"{DateTime.Now} \t Application started ... ");
             System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
-
-            var requests = ReadRequestsFromExcel(excelPath);
-
+            await Console.Out.WriteLineAsync($"{DateTime.Now} \t going to read csv file ");
+            var requests = ReadRequestsFromCsv(csvPath,clientId,clientSecret);
+            await Console.Out.WriteLineAsync($"{DateTime.Now} \t payload created for {requests.Count} requests  ");
             foreach (var request in requests)
             {
-                var response = await PostRequest(apiUrl, request);
-                Log.Information($"Request: {request.Body}, Response: {response}");
+                //var response = await PostRequest(apiUrl, request);
+                // Log.Information($"Request: {request.Body}, Response: {response}");
+                Log.Information($"Request: {request.Body}, Response: dummy ");
             }
 
             Log.CloseAndFlush();
         }
+        private static List<ApiRequest> ReadRequestsFromCsv(string csvPath,string clientId,string clientSecret)
+        {
+            var requests = new List<ApiRequest>();
 
+            using (var reader = new StreamReader(csvPath))
+            using (var csv = new CsvReader(reader, CultureInfo.InvariantCulture))
+            {
+                csv.Read(); // Read the first row (header)
+                csv.ReadHeader(); // Interpret the first row as headers
+                // Assuming the CSV file has headers (Header, Body)
+                while (csv.Read())
+                {
+                    
+                    var message = csv.GetField<string>("message");
+                    message = message.Remove(0, message.IndexOf("{\"PartLines\":"));
+                    message = message.Remove(message.Length-1, 1);
+                    var partLines = JsonConvert.DeserializeObject<Payload>(message);
+                    partLines.Campaign[0].customerReason = partLines.Campaign?.First()?.customerReason.RemoveSpecialCharacters();
+                    var payload = JsonConvert.SerializeObject(partLines);
+                    var headersDict = new Dictionary<string, string> ();
+                    headersDict.Add("client_id", clientId);
+                    headersDict.Add("client_secret", clientSecret);
+
+                    requests.Add(new ApiRequest { Headers = headersDict, Body = payload });
+                }
+            }
+
+            return requests;
+        }
         private static List<ApiRequest> ReadRequestsFromExcel(string excelPath)
         {
             var requests = new List<ApiRequest>();
@@ -69,7 +102,7 @@ namespace PostRequestApp
                             var body = string.Empty;
                             for (int i = 0; i < table.Columns.Count; i++)
                             {
-                                if (headerKeys[i].Equals("Body"))
+                                if (headerKeys[i].Equals("message"))
                                 {
                                     body = row[i].ToString();
                                 }
@@ -93,18 +126,25 @@ namespace PostRequestApp
 
         private static async Task<string> PostRequest(string apiUrl, ApiRequest request)
         {
-            using (var client = new HttpClient())
+            try
             {
-                foreach (var header in request.Headers)
+                using (var client = new HttpClient())
                 {
-                    client.DefaultRequestHeaders.Add(header.Key, header.Value);
+                    foreach (var header in request.Headers)
+                    {
+                        client.DefaultRequestHeaders.Add(header.Key, header.Value);
+                    }
+
+                    var content = new StringContent(request.Body, Encoding.UTF8, "application/json");
+                    var response = await client.PostAsync(apiUrl, content);
+                    var responseBody = await response.Content.ReadAsStringAsync();
+
+                    return responseBody;
                 }
-
-                var content = new StringContent(request.Body, Encoding.UTF8, "application/json");
-                var response = await client.PostAsync(apiUrl, content);
-                var responseBody = await response.Content.ReadAsStringAsync();
-
-                return responseBody;
+            }
+            catch(Exception ex) {
+                Log.Information($"Request: {request.Body}, Response: Exception \n ExceptionMessage : {ex.Message} \n ExceptionStackTrace :  {ex.StackTrace}");
+                return string.Empty;
             }
         }
 
